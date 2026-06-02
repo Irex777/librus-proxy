@@ -104,27 +104,55 @@ app.post('/browser-auth', async (req, res) => {
     });
     const page = await context.newPage();
 
-    // Step 1: Navigate to synergia login page (will redirect to portal)
-    console.log('[browser-auth] Navigating to synergia.librus.pl/loguj ...');
-    await page.goto('https://synergia.librus.pl/loguj', {
+    // Step 1: Navigate to the OAuth authorization page (actual login form)
+    console.log('[browser-auth] Navigating to api.librus.pl/OAuth/Authorization ...');
+    await page.goto('https://api.librus.pl/OAuth/Authorization?client_id=46', {
       waitUntil: 'networkidle',
       timeout: 90000,
     });
     console.log('[browser-auth] Page loaded, URL:', page.url());
 
-    // Step 2: Handle any Cloudflare challenge - wait for actual form
-    // The login page might be on portal.librus.pl after redirect
+    // If we got redirected to portal, try navigating directly
+    if (page.url().includes('portal.librus.pl') || page.url().includes('synergia.librus.pl/loguj')) {
+      console.log('[browser-auth] Redirected to portal, going back to OAuth endpoint...');
+      // First set initial cookies
+      await page.goto('https://api.librus.pl/', { waitUntil: 'commit', timeout: 30000 });
+      await page.goto('https://synergia.librus.pl/loguj/portalRodzina', { waitUntil: 'commit', timeout: 30000 });
+      await page.goto('https://api.librus.pl/OAuth/Authorization?client_id=46', {
+        waitUntil: 'networkidle',
+        timeout: 90000,
+      });
+      console.log('[browser-auth] Second attempt URL:', page.url());
+    }
+
+    // Step 2: Wait for login form
     const loginSelectors = [
       'input[name="login"]',
       'input[id="login"]',
       'input[name="email"]',
       'input[type="email"]',
       'input[autocomplete="username"]',
+      '#Login',
     ];
     const loginSelector = loginSelectors.join(', ');
 
     console.log('[browser-auth] Waiting for login form...');
-    await page.waitForSelector(loginSelector, { timeout: 45000 });
+    try {
+      await page.waitForSelector(loginSelector, { timeout: 15000 });
+    } catch (e) {
+      // Login form might not exist — try the portal login flow
+      console.log('[browser-auth] No direct login form, trying portal login...');
+      // Screenshot for debugging
+      const screenshot = await page.screenshot({ encoding: 'base64' });
+      const html = await page.content();
+      return res.status(500).json({
+        error: 'No login form found',
+        url: page.url(),
+        htmlLength: html.length,
+        htmlSnippet: html.substring(0, 5000),
+        screenshot: 'data:image/png;base64,' + screenshot.toString('base64'),
+      });
+    }
     await page.waitForSelector('input[type="password"]', { timeout: 10000 });
 
     // Step 3: Fill in credentials
