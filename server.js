@@ -114,17 +114,39 @@ app.post('/browser-auth', async (req, res) => {
     });
     console.log('[browser-auth] Page loaded, URL:', page.url());
 
-    // ---- DEBUG: capture screenshot + HTML immediately after navigation ----
-    await page.waitForTimeout(3000); // let any JS challenges settle
+    // ---- DEBUG: capture screenshot + HTML + innerText after navigation ----
+    // SPA needs more time to render JS components
+    console.log('[browser-auth] Waiting 10s for SPA to fully render...');
+    await page.waitForTimeout(10000);
     let debugScreenshotB64;
     let debugHtml;
+    let debugInnerText;
     try {
       const screenshotBuf = await page.screenshot();
       debugScreenshotB64 = screenshotBuf.toString('base64');
       debugHtml = await page.content();
-      console.log('[browser-auth] DEBUG page URL after 3s settle:', page.url());
+      debugInnerText = await page.evaluate(() => document.body?.innerText || '');
+      console.log('[browser-auth] DEBUG page URL after 10s settle:', page.url());
       console.log('[browser-auth] DEBUG HTML length:', debugHtml.length);
       console.log('[browser-auth] DEBUG HTML first 2000 chars:\n', debugHtml.substring(0, 2000));
+      console.log('[browser-auth] DEBUG innerText length:', (debugInnerText || '').length);
+      console.log('[browser-auth] DEBUG innerText first 3000 chars:\n', (debugInnerText || '').substring(0, 3000));
+      // Log all links and buttons visible on page
+      const visibleEls = await page.evaluate(() => {
+        const els = [];
+        document.querySelectorAll('a, button, [role="button"], [role="link"]').forEach(el => {
+          els.push({
+            tag: el.tagName,
+            text: (el.textContent || '').trim().substring(0, 100),
+            href: el.getAttribute('href') || '',
+            class: el.className || '',
+            id: el.id || '',
+            type: el.getAttribute('type') || '',
+          });
+        });
+        return els;
+      });
+      console.log('[browser-auth] DEBUG visible interactive elements:', JSON.stringify(visibleEls, null, 2));
       // Check for Cloudflare / captcha markers
       const cfDetected = /cf-browser-verification|cf_chl_opt|Challenge.Platform|challenge-running|__cf_bm/i.test(debugHtml);
       const captchaDetected = /captcha|recaptcha|hcaptcha|grecaptcha/i.test(debugHtml);
@@ -146,30 +168,78 @@ app.post('/browser-auth', async (req, res) => {
         payload.cfDetected = /cf-browser-verification|cf_chl_opt|Challenge.Platform|challenge-running|__cf_bm/i.test(debugHtml);
         payload.captchaDetected = /captcha|recaptcha|hcaptcha|grecaptcha/i.test(debugHtml);
       }
+      if (debugInnerText) {
+        payload.innerTextLength = debugInnerText.length;
+        payload.innerTextSnippet = debugInnerText.substring(0, 5000);
+      }
       return payload;
     }
     // ---- END DEBUG ----
 
-    // If we got redirected to portal, try navigating directly
+    // If we got redirected to portal, try navigating directly to login URLs
     if (page.url().includes('portal.librus.pl') || page.url().includes('synergia.librus.pl/loguj')) {
-      console.log('[browser-auth] Redirected to portal, going back to OAuth endpoint...');
-      // First set initial cookies
-      await page.goto('https://api.librus.pl/', { waitUntil: 'commit', timeout: 30000 });
-      await page.goto('https://synergia.librus.pl/loguj/portalRodzina', { waitUntil: 'commit', timeout: 30000 });
-      await page.goto('https://api.librus.pl/OAuth/Authorization?client_id=46', {
-        waitUntil: 'networkidle',
-        timeout: 90000,
-      });
-      console.log('[browser-auth] Second attempt URL:', page.url());
-      // Re-capture debug data after redirect retry
-      try {
-        await page.waitForTimeout(3000);
-        const screenshotBuf2 = await page.screenshot();
-        debugScreenshotB64 = screenshotBuf2.toString('base64');
-        debugHtml = await page.content();
-        console.log('[browser-auth] DEBUG (retry) HTML first 2000 chars:\n', debugHtml.substring(0, 2000));
-      } catch (dbgErr2) {
-        console.error('[browser-auth] DEBUG retry capture failed:', dbgErr2.message);
+      console.log('[browser-auth] Redirected to portal, trying direct login URLs...');
+      
+      // Strategy 1: Try direct login page URLs that the SPA might expose
+      const directLoginUrls = [
+        'https://portal.librus.pl/rodzina/login',
+        'https://portal.librus.pl/rodzina/synergia/loguj',
+        'https://synergia.librus.pl/loguj/portalRodzina',
+        'https://portal.librus.pl/rodzina',
+      ];
+      
+      let loginPageFound = false;
+      for (const loginUrl of directLoginUrls) {
+        try {
+          console.log('[browser-auth] Trying direct URL:', loginUrl);
+          await page.goto(loginUrl, { waitUntil: 'networkidle', timeout: 30000 });
+          await page.waitForTimeout(5000);
+          
+          // Check if login form appeared
+          const hasInputs = await page.evaluate(() => {
+            const inputs = document.querySelectorAll('input[type="text"], input[type="email"], input[name="login"], input[name="email"], input[id="login"], input[autocomplete="username"]');
+            const passwords = document.querySelectorAll('input[type="password"]');
+            return { inputs: inputs.length, passwords: passwords.length };
+          });
+          
+          console.log(`[browser-auth] At ${loginUrl}: inputs=${hasInputs.inputs}, passwords=${hasInputs.passwords}, url=${page.url()}`);
+          
+          if (hasInputs.inputs > 0 && hasInputs.passwords > 0) {
+            loginPageFound = true;
+            // Update debug data
+            try {
+              debugScreenshotB64 = (await page.screenshot()).toString('base64');
+              debugHtml = await page.content();
+              debugInnerText = await page.evaluate(() => document.body?.innerText || '');
+            } catch (_) {}
+            break;
+          }
+        } catch (navErr) {
+          console.log('[browser-auth] Direct URL failed:', navErr.message);
+        }
+      }
+      
+      // Strategy 2: Go back to OAuth endpoint with fresh cookies
+      if (!loginPageFound) {
+        console.log('[browser-auth] No direct login found, retrying OAuth flow...');
+        await page.goto('https://api.librus.pl/', { waitUntil: 'commit', timeout: 30000 });
+        await page.goto('https://synergia.librus.pl/loguj/portalRodzina', { waitUntil: 'commit', timeout: 30000 });
+        await page.goto('https://api.librus.pl/OAuth/Authorization?client_id=46', {
+          waitUntil: 'networkidle',
+          timeout: 90000,
+        });
+        console.log('[browser-auth] Second attempt URL:', page.url());
+        // Re-capture debug data after redirect retry
+        try {
+          await page.waitForTimeout(10000);
+          const screenshotBuf2 = await page.screenshot();
+          debugScreenshotB64 = screenshotBuf2.toString('base64');
+          debugHtml = await page.content();
+          debugInnerText = await page.evaluate(() => document.body?.innerText || '');
+          console.log('[browser-auth] DEBUG (retry) innerText first 3000:\n', debugInnerText.substring(0, 3000));
+        } catch (dbgErr2) {
+          console.error('[browser-auth] DEBUG retry capture failed:', dbgErr2.message);
+        }
       }
     }
 
