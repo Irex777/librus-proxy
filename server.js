@@ -4,7 +4,7 @@ const app = express();
 app.use(express.json());
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'librus-login-bot', version: 9 });
+  res.json({ status: 'ok', service: 'librus-login-bot', version: 10 });
 });
 
 app.post('/login-and-fetch', async (req, res) => {
