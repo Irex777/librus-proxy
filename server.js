@@ -90,6 +90,8 @@ app.post('/browser-auth', async (req, res) => {
   if (!login || !password) return res.status(400).json({ error: 'Missing login/password' });
 
   let browser;
+  let debugScreenshotB64;
+  let debugHtml;
   try {
     console.log('[browser-auth] Launching Chromium...');
     browser = await chromium.launch({
@@ -112,6 +114,42 @@ app.post('/browser-auth', async (req, res) => {
     });
     console.log('[browser-auth] Page loaded, URL:', page.url());
 
+    // ---- DEBUG: capture screenshot + HTML immediately after navigation ----
+    await page.waitForTimeout(3000); // let any JS challenges settle
+    let debugScreenshotB64;
+    let debugHtml;
+    try {
+      const screenshotBuf = await page.screenshot();
+      debugScreenshotB64 = screenshotBuf.toString('base64');
+      debugHtml = await page.content();
+      console.log('[browser-auth] DEBUG page URL after 3s settle:', page.url());
+      console.log('[browser-auth] DEBUG HTML length:', debugHtml.length);
+      console.log('[browser-auth] DEBUG HTML first 2000 chars:\n', debugHtml.substring(0, 2000));
+      // Check for Cloudflare / captcha markers
+      const cfDetected = /cf-browser-verification|cf_chl_opt|Challenge.Platform|challenge-running|__cf_bm/i.test(debugHtml);
+      const captchaDetected = /captcha|recaptcha|hcaptcha|grecaptcha/i.test(debugHtml);
+      console.log('[browser-auth] DEBUG Cloudflare detected:', cfDetected);
+      console.log('[browser-auth] DEBUG Captcha detected:', captchaDetected);
+      // Also log page title for quick context
+      const title = await page.title();
+      console.log('[browser-auth] DEBUG page title:', title);
+    } catch (dbgErr) {
+      console.error('[browser-auth] DEBUG capture failed:', dbgErr.message);
+    }
+    // Helper to build debug payload for error responses
+    function debugPayload(extra = {}) {
+      const payload = { ...extra };
+      if (debugScreenshotB64) payload.screenshot = 'data:image/png;base64,' + debugScreenshotB64;
+      if (debugHtml) {
+        payload.htmlLength = debugHtml.length;
+        payload.htmlSnippet = debugHtml.substring(0, 5000);
+        payload.cfDetected = /cf-browser-verification|cf_chl_opt|Challenge.Platform|challenge-running|__cf_bm/i.test(debugHtml);
+        payload.captchaDetected = /captcha|recaptcha|hcaptcha|grecaptcha/i.test(debugHtml);
+      }
+      return payload;
+    }
+    // ---- END DEBUG ----
+
     // If we got redirected to portal, try navigating directly
     if (page.url().includes('portal.librus.pl') || page.url().includes('synergia.librus.pl/loguj')) {
       console.log('[browser-auth] Redirected to portal, going back to OAuth endpoint...');
@@ -123,9 +161,103 @@ app.post('/browser-auth', async (req, res) => {
         timeout: 90000,
       });
       console.log('[browser-auth] Second attempt URL:', page.url());
+      // Re-capture debug data after redirect retry
+      try {
+        await page.waitForTimeout(3000);
+        const screenshotBuf2 = await page.screenshot();
+        debugScreenshotB64 = screenshotBuf2.toString('base64');
+        debugHtml = await page.content();
+        console.log('[browser-auth] DEBUG (retry) HTML first 2000 chars:\n', debugHtml.substring(0, 2000));
+      } catch (dbgErr2) {
+        console.error('[browser-auth] DEBUG retry capture failed:', dbgErr2.message);
+      }
     }
 
-    // Step 2: Wait for login form
+    // Step 2: Handle portal SPA - look for login button/link and click it
+    // The OAuth endpoint redirects to portal.librus.pl/rodzina which is a SPA
+    // Login is via a "Zaloguj" button that opens a modal/popup
+    console.log('[browser-auth] Checking if we need to click login button on portal...');
+    const currentUrl = page.url();
+    
+    if (currentUrl.includes('portal.librus.pl')) {
+      console.log('[browser-auth] On portal SPA, looking for Zaloguj/login button...');
+      // Try multiple selectors for the login button
+      const loginBtnSelectors = [
+        'a[href*="loguj"]',
+        'a[href*="login"]',
+        'button:has-text("Zaloguj")',
+        'a:has-text("Zaloguj")',
+        '[class*="login"]',
+        '[id*="login"]',
+        '.navbar-login',
+        'a[href*="OAuth"]',
+        'a[href*="Authorization"]',
+      ];
+      
+      let loginBtnFound = false;
+      for (const sel of loginBtnSelectors) {
+        try {
+          const btn = await page.$(sel);
+          if (btn) {
+            console.log(`[browser-auth] Found login button with selector: ${sel}`);
+            await btn.click();
+            loginBtnFound = true;
+            await page.waitForTimeout(2000); // wait for modal/form to appear
+            break;
+          }
+        } catch (e) {
+          // try next selector
+        }
+      }
+      
+      if (!loginBtnFound) {
+        // Try clicking by evaluating JS to find login links in the page
+        console.log('[browser-auth] No login button found by selectors, trying JS...');
+        const clicked = await page.evaluate(() => {
+          const links = document.querySelectorAll('a, button');
+          for (const link of links) {
+            const text = (link.textContent || '').toLowerCase();
+            const href = (link.getAttribute('href') || '').toLowerCase();
+            if (text.includes('zaloguj') || text.includes('log in') || text.includes('sign in') ||
+                href.includes('loguj') || href.includes('login') || href.includes('oauth') ||
+                href.includes('authorization')) {
+              link.click();
+              return { text: link.textContent.trim(), href: link.getAttribute('href') };
+            }
+          }
+          // Also check for elements with login-related classes
+          const loginEls = document.querySelectorAll('[class*="login"], [class*="Login"], [data-login]');
+          if (loginEls.length > 0) {
+            loginEls[0].click();
+            return { text: loginEls[0].textContent.trim(), class: loginEls[0].className };
+          }
+          return null;
+        });
+        
+        if (clicked) {
+          console.log('[browser-auth] Clicked via JS:', clicked);
+          await page.waitForTimeout(2000);
+        } else {
+          console.log('[browser-auth] No login button found at all on portal');
+        }
+      }
+      
+      // Re-capture after clicking login button
+      try {
+        await page.waitForTimeout(2000);
+        debugScreenshotB64 = (await page.screenshot()).toString('base64');
+        debugHtml = await page.content();
+        console.log('[browser-auth] After clicking login button, URL:', page.url());
+        console.log('[browser-auth] After clicking login button, HTML length:', debugHtml.length);
+        // Look for inputs in the new page/modal
+        const inputCount = await page.evaluate(() => document.querySelectorAll('input').length);
+        console.log('[browser-auth] Number of input elements after click:', inputCount);
+      } catch (e) {
+        console.error('[browser-auth] Re-capture failed:', e.message);
+      }
+    }
+
+    // Step 3: Wait for login form (now it should be visible after clicking login button)
     const loginSelectors = [
       'input[name="login"]',
       'input[id="login"]',
@@ -138,35 +270,51 @@ app.post('/browser-auth', async (req, res) => {
 
     console.log('[browser-auth] Waiting for login form...');
     try {
-      await page.waitForSelector(loginSelector, { timeout: 15000 });
+      await page.waitForSelector(loginSelector, { timeout: 20000 });
     } catch (e) {
-      // Login form might not exist — try the portal login flow
-      console.log('[browser-auth] No direct login form, trying portal login...');
-      // Screenshot for debugging
-      const screenshot = await page.screenshot({ encoding: 'base64' });
-      const html = await page.content();
-      return res.status(500).json({
+      console.log('[browser-auth] No login form found after 20s');
+      await browser.close();
+      return res.status(500).json(debugPayload({
         error: 'No login form found',
         url: page.url(),
-        htmlLength: html.length,
-        htmlSnippet: html.substring(0, 5000),
-        screenshot: 'data:image/png;base64,' + screenshot.toString('base64'),
-      });
+        inputCount: await (async () => {
+          try { return await page.evaluate(() => document.querySelectorAll('input').length); } catch { return '?'; }
+        })(),
+      }));
     }
-    await page.waitForSelector('input[type="password"]', { timeout: 10000 });
+    try {
+      await page.waitForSelector('input[type="password"]', { timeout: 10000 });
+    } catch (e) {
+      console.log('[browser-auth] Password field not found after 10s');
+      // Re-capture screenshot now (page may have changed)
+      try {
+        const screenshotBuf3 = await page.screenshot();
+        debugScreenshotB64 = screenshotBuf3.toString('base64');
+        debugHtml = await page.content();
+      } catch (_) {}
+      await browser.close();
+      return res.status(500).json(debugPayload({
+        error: 'No password field found',
+        url: page.url(),
+      }));
+    }
 
     // Step 3: Fill in credentials
     const loginInput = await page.$(loginSelector);
     const passwordInput = await page.$('input[type="password"]');
 
     if (!loginInput || !passwordInput) {
-      const html = await page.content();
+      // Re-capture since we found selectors earlier but $ returned null
+      try {
+        const screenshotBuf4 = await page.screenshot();
+        debugScreenshotB64 = screenshotBuf4.toString('base64');
+        debugHtml = await page.content();
+      } catch (_) {}
       await browser.close();
-      return res.status(500).json({
-        error: 'Could not find login form elements',
+      return res.status(500).json(debugPayload({
+        error: 'Could not find login form elements (selector found but $ returned null)',
         url: page.url(),
-        htmlSnippet: html.substring(0, 3000),
-      });
+      }));
     }
 
     console.log('[browser-auth] Filling credentials...');
@@ -219,21 +367,28 @@ app.post('/browser-auth', async (req, res) => {
       // Check if we ended up on an error/2FA page
       const currentUrl = page.url();
       console.log('[browser-auth] URL after wait:', currentUrl);
+      // Re-capture debug data at this point
+      try {
+        const lateScreenshot = await page.screenshot();
+        debugScreenshotB64 = lateScreenshot.toString('base64');
+        debugHtml = await page.content();
+        console.log('[browser-auth] DEBUG (post-submit) HTML first 2000 chars:\n', debugHtml.substring(0, 2000));
+      } catch (_) {}
       if (currentUrl.includes('2fa') || currentUrl.includes('two-factor') || currentUrl.includes('challenge')) {
         await browser.close();
-        return res.status(200).json({
+        return res.status(200).json(debugPayload({
           success: false,
           message: '2FA/challenge required - not yet supported',
           url: currentUrl,
-        });
+        }));
       }
       // If we're not on login page, might still be OK
       if (currentUrl.includes('/loguj') || currentUrl.includes('/login')) {
         await browser.close();
-        return res.status(401).json({
+        return res.status(401).json(debugPayload({
           error: 'Login failed - still on login page',
           url: currentUrl,
-        });
+        }));
       }
     }
 
@@ -271,7 +426,13 @@ app.post('/browser-auth', async (req, res) => {
   } catch (err) {
     if (browser) await browser.close().catch(() => {});
     console.error('[browser-auth] Error:', err.message);
-    res.status(500).json({ error: 'Browser auth failed', details: err.message });
+    const errPayload = { error: 'Browser auth failed', details: err.message };
+    if (debugScreenshotB64) errPayload.screenshot = 'data:image/png;base64,' + debugScreenshotB64;
+    if (debugHtml) {
+      errPayload.htmlLength = debugHtml.length;
+      errPayload.htmlSnippet = debugHtml.substring(0, 5000);
+    }
+    res.status(500).json(errPayload);
   }
 });
 
