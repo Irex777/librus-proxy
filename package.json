@@ -1,0 +1,12 @@
+{
+  "name": "librus-proxy",
+  "version": "1.0.0",
+  "description": "Tiny proxy to forward requests to api.librus.pl",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
