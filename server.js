@@ -186,4 +186,4 @@ app.post('/login-and-fetch', async (req, res) => {
   }
 });
 
-app.listen(3000, () => console.log('Librus login bot v8 listening on :3000'));
+app.listen(3000, () => console.log('Librus login bot v8 listening on :3000 - build 8'));
