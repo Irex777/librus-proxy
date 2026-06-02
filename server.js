@@ -27,8 +27,8 @@ app.post('/login-and-fetch', async (req, res) => {
     // Step 1: Go to portal.librus.pl/rodzina
     console.log('[1] Going to portal...');
     await page.goto('https://portal.librus.pl/rodzina', {
-      waitUntil: 'networkidle',
-      timeout: 60000,
+      waitUntil: 'domcontentloaded',
+      timeout: 30000,
     });
     await page.waitForTimeout(3000);
     console.log('[1] URL:', page.url());
@@ -145,7 +145,7 @@ app.post('/login-and-fetch', async (req, res) => {
       const page2 = await ctx.newPage();
       try {
         const resp = await page2.goto('https://api.librus.pl/OAuth/Authorization?client_id=46', {
-          waitUntil: 'networkidle',
+          waitUntil: 'domcontentloaded',
           timeout: 30000,
         });
         const oauthUrl = page2.url();
@@ -166,13 +166,13 @@ app.post('/login-and-fetch', async (req, res) => {
             await lf.fill(login);
             await pf.fill(password);
             await Promise.all([
-              page2.waitForNavigation({ waitUntil: 'networkidle', timeout: 60000 }).catch(() => {}),
+              page2.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {}),
               pf.press('Enter'),
             ]);
             console.log('[7] After OAuth submit URL:', page2.url());
             
             // Transfer cookies to main page
-            await page.goto(page2.url(), { waitUntil: 'networkidle', timeout: 30000 });
+            await page.goto(page2.url(), { waitUntil: 'domcontentloaded', timeout: 30000 });
             loggedIn = !page.url().includes('/loguj') && page.url().includes('synergia');
           }
         }
