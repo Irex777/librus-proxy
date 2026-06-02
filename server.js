@@ -176,6 +176,43 @@ app.post('/browser-auth', async (req, res) => {
     }
     // ---- END DEBUG ----
 
+    // ---- STEP 1.5: Accept cookie consent banner if present ----
+    // The portal shows a cookie consent dialog that blocks the page
+    console.log('[browser-auth] Checking for cookie consent banner...');
+    try {
+      const cookieAccepted = await page.evaluate(() => {
+        // Look for cookie consent accept buttons
+        const buttons = document.querySelectorAll('button, a, [role="button"]');
+        for (const btn of buttons) {
+          const text = (btn.textContent || '').trim().toLowerCase();
+          if (text.includes('akceptuję') || text.includes('akceptuje') || 
+              text.includes('przechodzę') || text.includes('zgadzam się') ||
+              text.includes('accept all') || text.includes('i agree') ||
+              text.includes('akceptuj') || text === 'ok') {
+            btn.click();
+            return { clicked: true, text: btn.textContent.trim().substring(0, 80) };
+          }
+        }
+        // Also check for cookie banners that can be dismissed
+        const banner = document.querySelector('[class*="cookie"], [id*="cookie"], [class*="consent"], [id*="consent"], [class*="banner"], [class*="gdpr"]');
+        if (banner) {
+          banner.remove();
+          return { clicked: true, text: 'Cookie banner removed' };
+        }
+        return { clicked: false };
+      });
+      if (cookieAccepted.clicked) {
+        console.log('[browser-auth] Accepted/removed cookie banner:', cookieAccepted.text);
+        await page.waitForTimeout(2000);
+      } else {
+        console.log('[browser-auth] No cookie consent banner found');
+      }
+    } catch (cookieErr) {
+      console.log('[browser-auth] Cookie consent handling error:', cookieErr.message);
+    }
+
+    // ---- END STEP 1.5 ----
+
     // If we got redirected to portal, try navigating directly to login URLs
     if (page.url().includes('portal.librus.pl') || page.url().includes('synergia.librus.pl/loguj')) {
       console.log('[browser-auth] Redirected to portal, trying direct login URLs...');
