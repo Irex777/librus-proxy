@@ -19,30 +19,40 @@ async function loginAndFetchMessages(login, password) {
   });
   const page = await ctx.newPage();
 
-  // Step 1: Go to the portal login page
-  console.log('[1] Navigating to portal...');
-  await page.goto('https://portal.librus.pl/rodzina', {
+  // Step 1: Go directly to the synergia login page (not OAuth, not portal)
+  // synergia.librus.pl is reachable from the VPS
+  // The login form at /loguj/portalRodzina renders server-side
+  console.log('[1] Navigating to synergia login page...');
+  await page.goto('https://synergia.librus.pl/loguj/portalRodzina', {
     waitUntil: 'domcontentloaded',
     timeout: 30000,
   });
-  await page.waitForTimeout(5000); // let SPA render
-
-  // Step 2: Accept cookie consent if present
+  await page.waitForTimeout(3000);
+  console.log('[1] Current URL:', page.url());
+  
+  // Step 2: Accept cookie consent if present (may appear as popup/banner)
   console.log('[2] Checking for cookie consent...');
-  const cookieResult = await page.evaluate(() => {
-    const buttons = document.querySelectorAll('button, a, [role="button"]');
-    for (const btn of buttons) {
-      const text = (btn.textContent || '').trim().toLowerCase();
-      if (text.includes('akceptuję') || text.includes('akceptuje') ||
-          text.includes('przechodzę') || text.includes('accept all')) {
-        btn.click();
-        return 'clicked: ' + btn.textContent.trim().substring(0, 60);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const cookieResult = await page.evaluate(() => {
+      const buttons = document.querySelectorAll('button, a, [role="button"]');
+      for (const btn of buttons) {
+        const text = (btn.textContent || '').trim().toLowerCase();
+        if (text.includes('akceptuję') || text.includes('akceptuje') ||
+            text.includes('przechodzę') || text.includes('accept all') ||
+            text.includes('włącz wszystkie')) {
+          btn.click();
+          return 'clicked: ' + btn.textContent.trim().substring(0, 60);
+        }
       }
+      return 'no banner';
+    });
+    console.log(`[2] Cookie attempt ${attempt}:`, cookieResult);
+    if (cookieResult !== 'no banner') {
+      await page.waitForTimeout(2000);
+      break;
     }
-    return 'no banner';
-  });
-  console.log('[2] Cookie result:', cookieResult);
-  await page.waitForTimeout(2000);
+    await page.waitForTimeout(2000);
+  }
 
   // Step 3: Take screenshot and get page text
   const screenshot = await page.screenshot();
